@@ -1,0 +1,14 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+.env/
+
+# Data and generated output files
+top1000_returns_master.csv
+top1000_return_report.xlsx
+*.log
