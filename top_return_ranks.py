@@ -329,7 +329,8 @@ def main():
 
 
 # ------------------------------------------------------------------
-# 7) OPTIONAL: Copy outputs to Drive (Colab) and Windows Google Drive
+# 7) OPTIONAL: Copy outputs to Drive (Colab), Windows Google Drive,
+#    AND your local project folder.
 # ------------------------------------------------------------------
 try:
     import os, shutil
@@ -341,19 +342,19 @@ try:
     if os.path.exists(EXCEL_REPORT):
         files_to_copy.append(EXCEL_REPORT)
 
-    # --- A) If running in Google Colab, copy to your Drive folder ---
-    colab_drive_path = "/content/drive/MyDrive/Investment Report Outputs"
-    if os.path.isdir(colab_drive_path):
+    # --- A) Copy into your LOCAL project folder (Windows PC) ---
+    local_project_path = r"C:\Users\Tommy\top_stock_returns"
+    if os.path.isdir(local_project_path):
         for fname in files_to_copy:
-            dst = os.path.join(colab_drive_path, os.path.basename(fname))
+            dst = os.path.join(local_project_path, os.path.basename(fname))
             try:
                 shutil.copy2(fname, dst)
                 print(f"[COPY] {fname} -> {dst}")
             except Exception as e:
-                print(f"[WARN] Could not copy {fname} to Drive: {e}")
+                print(f"[WARN] Could not copy {fname} to local project folder: {e}")
 
-    # --- B) If running on Windows with Google Drive installed ---
-    windows_drive_path = r"G:\My Drive\Investment Report Outputs"
+    # --- B) Copy into Windows Google Drive folder ---
+    windows_drive_path = r"G:\My Drive\Top Stocks Output"
     if os.path.isdir(windows_drive_path):
         for fname in files_to_copy:
             dst = os.path.join(windows_drive_path, os.path.basename(fname))
@@ -361,7 +362,18 @@ try:
                 shutil.copy2(fname, dst)
                 print(f"[COPY] {fname} -> {dst}")
             except Exception as e:
-                print(f"[WARN] Could not copy {fname} locally to G:\\My Drive: {e}")
+                print(f"[WARN] Could not copy {fname} to Windows Drive: {e}")
+
+    # --- C) Copy into Colab Google Drive folder ---
+    colab_drive_path = "/content/drive/MyDrive/Top Stocks Output"
+    if os.path.isdir(colab_drive_path):
+        for fname in files_to_copy:
+            dst = os.path.join(colab_drive_path, os.path.basename(fname))
+            try:
+                shutil.copy2(fname, dst)
+                print(f"[COPY] {fname} -> {dst}")
+            except Exception as e:
+                print(f"[WARN] Could not copy {fname} to Colab Drive: {e}")
 
 except Exception as outer_err:
     print(f"[WARN] Output copy step failed: {outer_err}")
