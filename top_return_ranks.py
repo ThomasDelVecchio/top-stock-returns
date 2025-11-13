@@ -126,6 +126,7 @@ def download_price_history_batched(tickers, period=YFINANCE_PERIOD, batch_size=Y
     tickers: list of original symbols (e.g. BRK.B)
     We normalize to Yahoo symbols internally (e.g. BRK-B)
     but keep columns / index as the original tickers.
+    More robust with extra debug prints.
     """
     print(f"[STEP] Downloading daily prices for {len(tickers)} tickers from Yahoo Finance...")
     all_closes = {}
@@ -136,19 +137,28 @@ def download_price_history_batched(tickers, period=YFINANCE_PERIOD, batch_size=Y
 
         print(f"[INFO]  Batch {i // batch_size + 1}: {len(batch_orig)} tickers "
               f"({', '.join(batch_orig[:5])}...)")
+        print(f"[DEBUG] Yahoo symbols sample: {', '.join(batch_yahoo[:5])}")
 
-        data = yf.download(
-            tickers=batch_yahoo,
-            period=period,
-            interval="1d",
-            auto_adjust=True,
-            group_by="ticker",
-            progress=False,
-            threads=True,
-        )
+        try:
+            data = yf.download(
+                tickers=batch_yahoo,
+                period=period,
+                interval="1d",
+                auto_adjust=True,
+                group_by="ticker",
+                progress=False,
+                threads=True,
+            )
+        except Exception as e:
+            print(f"[WARN] yf.download failed for batch {i // batch_size + 1}: {e}")
+            continue
 
+        if data is None or data.empty:
+            print(f"[WARN] Empty price data returned for batch {i // batch_size + 1}. Skipping.")
+            continue
+
+        # Multi-ticker case
         if isinstance(data.columns, pd.MultiIndex):
-            # multiple tickers
             for orig, ysym in zip(batch_orig, batch_yahoo):
                 try:
                     if (ysym, "Close") in data.columns:
@@ -159,10 +169,13 @@ def download_price_history_batched(tickers, period=YFINANCE_PERIOD, batch_size=Y
                         continue
                     if not series.empty:
                         all_closes[orig] = series
+                    else:
+                        print(f"[DEBUG] No non-NA prices for {orig} ({ysym}) in this batch.")
                 except KeyError:
+                    print(f"[DEBUG] {ysym} not found in returned columns for this batch.")
                     continue
         else:
-            # single ticker
+            # Single-ticker case (should be rare here but keep it)
             orig = batch_orig[0]
             if "Close" in data.columns:
                 series = data["Close"].dropna()
@@ -173,13 +186,21 @@ def download_price_history_batched(tickers, period=YFINANCE_PERIOD, batch_size=Y
 
             if series is not None and not series.empty:
                 all_closes[orig] = series
+            else:
+                print(f"[DEBUG] No non-NA prices for single-ticker batch {orig}.")
 
     if not all_closes:
-        raise RuntimeError("No price data downloaded. Check tickers or internet connection.")
+        raise RuntimeError(
+            "No price data downloaded at all. Likely causes:\n"
+            "  - No internet connection\n"
+            "  - VPN/firewall blocking Yahoo Finance\n"
+            "  - Temporary Yahoo issue (try again in a bit)\n"
+        )
 
     prices = pd.DataFrame(all_closes).sort_index()
     print(f"[INFO] Price history shape: {prices.shape} (rows = days, cols = tickers)")
     return prices
+
 
 
 # ==========================================================
@@ -218,7 +239,61 @@ def compute_horizon_returns(prices, horizons_days):
 
 
 # ==========================================================
-# 4) RANKED VIEWS + SAVING (NICER DISPLAY + README)
+# 3b) TREND CANDIDATES (TOP 10)
+# ==========================================================
+def compute_trend_candidates(returns_df, min_positive_horizons=2, top_k=10):
+    """
+    Build a composite 'trendiness' score per ticker:
+
+      1) Rank each ticker within each horizon (higher return = better rank)
+      2) Convert ranks into percentile scores between 0 and 1
+         (1.0 = top performer, 0.0 = bottom)
+      3) Average percentile scores across horizons -> composite_score
+      4) Require at least `min_positive_horizons` horizons with >0% return
+      5) Return top_k tickers by composite_score
+
+    Returns DataFrame indexed by ticker, with columns:
+      - per-horizon percentile scores: 1w_score, 1m_score, 3m_score, 6m_score
+      - composite_score
+      - raw returns per horizon: 1w, 1m, 3m, 6m
+    """
+    if returns_df.empty:
+        return pd.DataFrame()
+
+    df = returns_df.copy()
+    n = len(df)
+    rank_pct = pd.DataFrame(index=df.index)
+
+    # Per-horizon percentile scores with "_score" suffix
+    if n > 1:
+        for col in df.columns:
+            ranks = df[col].rank(ascending=False, method="average")
+            # percentile: top rank -> 1.0, bottom -> 0.0
+            rank_pct[f"{col}_score"] = 1.0 - (ranks - 1.0) / (n - 1.0)
+    else:
+        for col in df.columns:
+            rank_pct[f"{col}_score"] = 1.0
+
+    score_cols = [c for c in rank_pct.columns if c.endswith("_score")]
+    rank_pct["composite_score"] = rank_pct[score_cols].mean(axis=1)
+
+    # require at least X horizons with positive return
+    pos_mask = (df > 0).sum(axis=1) >= min_positive_horizons
+    filtered = rank_pct[pos_mask]
+
+    if filtered.empty:
+        return pd.DataFrame()
+
+    top = filtered.sort_values("composite_score", ascending=False).head(top_k)
+
+    # join back raw returns (1w, 1m, 3m, 6m) – no name collision now
+    top_full = top.join(df, how="left")
+
+    return top_full
+
+
+# ==========================================================
+# 4) RANKED VIEWS + SAVING (NICER DISPLAY + README + TREND TAB)
 # ==========================================================
 def build_ranked_views(returns_df):
     ranked_views = {}
@@ -227,7 +302,7 @@ def build_ranked_views(returns_df):
     return ranked_views
 
 
-def save_report(returns_df, ranked_views, master_csv=MASTER_CSV, excel_path=EXCEL_REPORT):
+def save_report(returns_df, ranked_views, trend_df=None, master_csv=MASTER_CSV, excel_path=EXCEL_REPORT):
     print("[STEP] Saving master CSV and Excel report...")
 
     # ---------- CSV (keep values as % numbers, not decimal) ----------
@@ -243,7 +318,7 @@ def save_report(returns_df, ranked_views, master_csv=MASTER_CSV, excel_path=EXCE
     print(f"[OUT] Master CSV saved to {master_csv}")
 
     # ---------- Excel ----------
-    # For Excel, convert to decimal (0.1234) and format as %
+    # For Excel, convert returns to decimal (0.1234) and format as %
     def display_df(df):
         df_disp = df.copy() / 100.0
         df_disp.columns = ["1W %", "1M %", "3M %", "6M %"]
@@ -258,7 +333,26 @@ def save_report(returns_df, ranked_views, master_csv=MASTER_CSV, excel_path=EXCE
             sheet_name = f"Top_{horizon}"
             display_df(df_view).to_excel(writer, sheet_name=sheet_name)
 
-        # 3) ReadMe sheet explaining each tab
+        # 3) Trend candidates sheet (Top 10)
+        if trend_df is not None and not trend_df.empty:
+            trend_disp = trend_df.copy()
+            # Convert return columns into decimals for Excel
+            for c in ["1w", "1m", "3m", "6m"]:
+                if c in trend_disp.columns:
+                    trend_disp[c] = trend_disp[c] / 100.0
+            # Rename return columns for display
+            trend_disp = trend_disp.rename(
+                columns={
+                    "1w": "1W %",
+                    "1m": "1M %",
+                    "3m": "3M %",
+                    "6m": "6M %",
+                }
+            )
+            # Keep composite_score as 0–1 (will be formatted as % in Excel)
+            trend_disp.to_excel(writer, sheet_name="Top_Trend_10")
+
+        # 4) ReadMe sheet explaining each tab + methodology
         readme_data = {
             "Sheet": [
                 "Master",
@@ -266,6 +360,7 @@ def save_report(returns_df, ranked_views, master_csv=MASTER_CSV, excel_path=EXCE
                 "Top_1m",
                 "Top_3m",
                 "Top_6m",
+                "Top_Trend_10",
             ],
             "Description": [
                 "All tickers with 1-week, 1-month, 3-month, and 6-month total returns, expressed as price-change percentages. One row per ticker.",
@@ -273,6 +368,13 @@ def save_report(returns_df, ranked_views, master_csv=MASTER_CSV, excel_path=EXCE
                 "Same table as Master, sorted by 1-month return (1M %) from highest to lowest.",
                 "Same table as Master, sorted by 3-month return (3M %) from highest to lowest.",
                 "Same table as Master, sorted by 6-month return (6M %) from highest to lowest.",
+                (
+                    "Top 10 'trend candidates' based on a composite score across all horizons. "
+                    "For each ticker, we rank it within each horizon (1W, 1M, 3M, 6M), convert ranks "
+                    "into percentile scores (0–1), and average those percentiles into composite_score. "
+                    "Only tickers with positive returns in at least 2 horizons are included, then we "
+                    "take the 10 highest composite_score names."
+                ),
             ],
         }
         pd.DataFrame(readme_data).to_excel(writer, sheet_name="ReadMe", index=False)
@@ -319,33 +421,33 @@ def main():
     # 4) Ranked views
     ranked_views = build_ranked_views(returns_df)
 
-    # 5) Console preview
-    print_top_snippets(returns_df, top_n=20)
+    # 5) Trend candidates (Top 10)
+    trend_df = compute_trend_candidates(returns_df, min_positive_horizons=2, top_k=10)
 
-    # 6) Save report
-    save_report(returns_df, ranked_views, MASTER_CSV, EXCEL_REPORT)
+    # 6) Console preview
+    print_top_snippets(returns_df, top_n=20)
+    if trend_df is not None and not trend_df.empty:
+        print("\n=========== TOP 10 TREND CANDIDATES (composite_score desc) ===========")
+        print(trend_df[["composite_score", "1w", "1m", "3m", "6m"]].round(2))
+
+    # 7) Save report (includes Top_Trend_10 tab and methodology)
+    save_report(returns_df, ranked_views, trend_df, MASTER_CSV, EXCEL_REPORT)
 
     print("[DONE] All finished.")
 
 
 # ------------------------------------------------------------------
-# 7) OPTIONAL: Copy outputs to Drive (Colab), Windows Google Drive,
-#    AND your local project folder.
+# 8) OPTIONAL: Copy outputs to Drive / local folders (your old block)
 # ------------------------------------------------------------------
 try:
     import os, shutil
 
-    # Local output files created by this script
     files_to_copy = []
     if os.path.exists(MASTER_CSV):
         files_to_copy.append(MASTER_CSV)
     if os.path.exists(EXCEL_REPORT):
         files_to_copy.append(EXCEL_REPORT)
 
-    # -------------------------------
-    # A) Copy into YOUR LOCAL PROJECT FOLDER
-    # (ensures you always have a local backup)
-    # -------------------------------
     windows_project_folder = r"C:\Users\Tommy\top_stock_returns"
     if os.path.isdir(windows_project_folder):
         for fname in files_to_copy:
@@ -356,9 +458,6 @@ try:
             except Exception as e:
                 print(f"[WARN] Could not copy {fname} to local folder: {e}")
 
-    # -------------------------------
-    # B) Copy into Windows Google Drive
-    # -------------------------------
     windows_drive_path = r"G:\My Drive\Top Stocks Output"
     if os.path.isdir(windows_drive_path):
         for fname in files_to_copy:
@@ -369,9 +468,6 @@ try:
             except Exception as e:
                 print(f"[WARN] Could not copy {fname} to Windows Drive: {e}")
 
-    # -------------------------------
-    # C) Copy into Google Colab Drive
-    # -------------------------------
     colab_drive_path = "/content/drive/MyDrive/Top Stocks Output"
     if os.path.isdir(colab_drive_path):
         for fname in files_to_copy:
