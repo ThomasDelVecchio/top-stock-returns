@@ -328,6 +328,45 @@ def main():
     print("[DONE] All finished.")
 
 
+# ------------------------------------------------------------------
+# 7) OPTIONAL: Copy outputs to Drive (Colab) and Windows Google Drive
+# ------------------------------------------------------------------
+try:
+    import os, shutil
+
+    # Local output files created by this script
+    files_to_copy = []
+    if os.path.exists(MASTER_CSV):
+        files_to_copy.append(MASTER_CSV)
+    if os.path.exists(EXCEL_REPORT):
+        files_to_copy.append(EXCEL_REPORT)
+
+    # --- A) If running in Google Colab, copy to your Drive folder ---
+    colab_drive_path = "/content/drive/MyDrive/Investment Report Outputs"
+    if os.path.isdir(colab_drive_path):
+        for fname in files_to_copy:
+            dst = os.path.join(colab_drive_path, os.path.basename(fname))
+            try:
+                shutil.copy2(fname, dst)
+                print(f"[COPY] {fname} -> {dst}")
+            except Exception as e:
+                print(f"[WARN] Could not copy {fname} to Drive: {e}")
+
+    # --- B) If running on Windows with Google Drive installed ---
+    windows_drive_path = r"G:\My Drive\Investment Report Outputs"
+    if os.path.isdir(windows_drive_path):
+        for fname in files_to_copy:
+            dst = os.path.join(windows_drive_path, os.path.basename(fname))
+            try:
+                shutil.copy2(fname, dst)
+                print(f"[COPY] {fname} -> {dst}")
+            except Exception as e:
+                print(f"[WARN] Could not copy {fname} locally to G:\\My Drive: {e}")
+
+except Exception as outer_err:
+    print(f"[WARN] Output copy step failed: {outer_err}")
+
+
 if __name__ == "__main__":
     import traceback
     try:
