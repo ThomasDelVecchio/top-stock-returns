@@ -342,18 +342,23 @@ try:
     if os.path.exists(EXCEL_REPORT):
         files_to_copy.append(EXCEL_REPORT)
 
-    # --- A) Copy into your LOCAL project folder (Windows PC) ---
-    local_project_path = r"C:\Users\Tommy\top_stock_returns"
-    if os.path.isdir(local_project_path):
+    # -------------------------------
+    # A) Copy into YOUR LOCAL PROJECT FOLDER
+    # (ensures you always have a local backup)
+    # -------------------------------
+    windows_project_folder = r"C:\Users\Tommy\top_stock_returns"
+    if os.path.isdir(windows_project_folder):
         for fname in files_to_copy:
-            dst = os.path.join(local_project_path, os.path.basename(fname))
+            dst = os.path.join(windows_project_folder, os.path.basename(fname))
             try:
                 shutil.copy2(fname, dst)
                 print(f"[COPY] {fname} -> {dst}")
             except Exception as e:
-                print(f"[WARN] Could not copy {fname} to local project folder: {e}")
+                print(f"[WARN] Could not copy {fname} to local folder: {e}")
 
-    # --- B) Copy into Windows Google Drive folder ---
+    # -------------------------------
+    # B) Copy into Windows Google Drive
+    # -------------------------------
     windows_drive_path = r"G:\My Drive\Top Stocks Output"
     if os.path.isdir(windows_drive_path):
         for fname in files_to_copy:
@@ -364,7 +369,9 @@ try:
             except Exception as e:
                 print(f"[WARN] Could not copy {fname} to Windows Drive: {e}")
 
-    # --- C) Copy into Colab Google Drive folder ---
+    # -------------------------------
+    # C) Copy into Google Colab Drive
+    # -------------------------------
     colab_drive_path = "/content/drive/MyDrive/Top Stocks Output"
     if os.path.isdir(colab_drive_path):
         for fname in files_to_copy:
