@@ -1,14 +1,34 @@
-# Python cache
+# ==========================
+# Ignore EVERYTHING by default
+# ==========================
+*
+
+# ==========================
+# Allow these specific files
+# ==========================
+!New_GitHub_TopStocks.py
+!Sample_Report.xlsx
+!Sample_Master.csv
+!README.md
+!Trend_Analysis_CheatSheet.docx
+
+# ==========================
+# Allow folders to exist
+# ==========================
+!*/
+
+# ==========================
+# Python ignores (still good practice)
+# ==========================
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.pytest_cache/
+*.DS_Store
 
-# Virtual environments
-venv/
-.env/
-
-# Data and generated output files
-top1000_returns_master.csv
-top1000_return_report.xlsx
-*.log
+# ==========================
+# Optional: ignore backups/temp
+# ==========================
+~$*.docx
+~$*.xlsx
