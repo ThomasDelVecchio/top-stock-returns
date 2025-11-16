@@ -299,8 +299,6 @@ def compute_vol_and_risk_adjusted(prices, returns_df):
     # convert 6m % return to fraction
     sixm_frac = returns_df["6m"] / 100.0
     out["risk_adj_score"] = sixm_frac / out["vol_6m"]
-    out["risk_adj_score"] = out["risk_adj_score"].replace([pd.NA, pd.NaT], pd.NA)
-
     return out
 
 
@@ -361,7 +359,6 @@ def compute_new_momentum_flag(returns_df):
     df = returns_df.copy()
     all_pos = (df["1w"] > 0) & (df["1m"] > 0) & (df["3m"] > 0) & (df["6m"] > 0)
 
-    # acceleration-ish: recent annualized-ish > longer
     cond_1 = df["1m"] >= df["3m"] / 3.0
     cond_2 = df["3m"] >= df["6m"] / 3.0
 
@@ -375,8 +372,6 @@ def compute_new_momentum_flag(returns_df):
 def fetch_sectors_for_tickers(tickers):
     """
     Best effort sector lookup via yfinance.Ticker(info).
-    For performance, this loops per ticker; it's fine for small top lists,
-    and acceptable for 1k if you don't run it constantly.
     """
     sectors = {}
     print("[STEP] Fetching sectors from Yahoo (best effort)...")
@@ -449,13 +444,21 @@ def compute_final_scores(analytics_df):
 
 
 # ==========================================================
-# 4) RANKED VIEWS + SAVING (NICER DISPLAY + ALL TABS)
+# 4) RANKED VIEWS + SAVING (HUMAN-FRIENDLY SHEETS)
 # ==========================================================
 def build_ranked_views(returns_df):
     ranked_views = {}
     for col in returns_df.columns:
         ranked_views[col] = returns_df.sort_values(col, ascending=False)
     return ranked_views
+
+
+def _yes_no_map(val):
+    if isinstance(val, bool):
+        return "Yes" if val else "No"
+    if isinstance(val, (int, float)):
+        return "Yes" if val >= 0.5 else "No"
+    return "No"
 
 
 def save_report(
@@ -497,63 +500,144 @@ def save_report(
             sheet_name = f"Top_{horizon}"
             display_returns(df_view).to_excel(writer, sheet_name=sheet_name)
 
-        # 3) Top_Trend_10 (enriched)
+        # 3) Top_Trend_10 (enriched, but renamed & cleaned)
         if top_trend_df is not None and not top_trend_df.empty:
             trend_disp = top_trend_df.copy()
-            # convert return % columns to decimals for Excel
+
+            # Convert returns to decimals
             for c in ["1w", "1m", "3m", "6m"]:
                 if c in trend_disp.columns:
                     trend_disp[c] = trend_disp[c] / 100.0
+
+            # Convert flags to Yes/No
+            for col in ["new_momentum_flag", "pullback_flag", "above_50d", "above_200d"]:
+                if col in trend_disp.columns:
+                    trend_disp[col] = trend_disp[col].map(_yes_no_map)
+
+            # Rename columns to be readable
+            trend_rename = {
+                "composite_score": "Trend_Strength_Score",
+                "risk_adj_score": "Risk_Adjusted_6M",
+                "risk_adj_pct": "Risk_Adjusted_Percentile",
+                "new_momentum_flag": "Is_Trend_Accelerating",
+                "pullback_flag": "Is_Strong_Trend_Pulled_Back",
+                "above_50d": "Above_50_Day_MA",
+                "above_200d": "Above_200_Day_MA",
+                "sector": "Sector",
+                "1w": "1W %",
+                "1m": "1M %",
+                "3m": "3M %",
+                "6m": "6M %",
+                "final_score": "Final_Composite_Score",
+            }
+            trend_disp = trend_disp.rename(columns=trend_rename)
+
             trend_disp.to_excel(writer, sheet_name="Top_Trend_10", startrow=1)
 
-        # 4) Top_Final_10 (overall recommendation)
+        # 4) Top_Final_10 (full info, readable names)
+        lite_disp = None
         if top_final_df is not None and not top_final_df.empty:
             final_disp = top_final_df.copy()
+
             for c in ["1w", "1m", "3m", "6m"]:
                 if c in final_disp.columns:
                     final_disp[c] = final_disp[c] / 100.0
+
+            for col in ["new_momentum_flag", "pullback_flag", "above_50d", "above_200d"]:
+                if col in final_disp.columns:
+                    final_disp[col] = final_disp[col].map(_yes_no_map)
+
+            final_rename = {
+                "composite_score": "Trend_Strength_Score",
+                "risk_adj_score": "Risk_Adjusted_6M",
+                "risk_adj_pct": "Risk_Adjusted_Percentile",
+                "new_momentum_flag": "Is_Trend_Accelerating",
+                "pullback_flag": "Is_Strong_Trend_Pulled_Back",
+                "above_50d": "Above_50_Day_MA",
+                "above_200d": "Above_200_Day_MA",
+                "sector": "Sector",
+                "1w": "1W %",
+                "1m": "1M %",
+                "3m": "3M %",
+                "6m": "6M %",
+                "final_score": "Final_Composite_Score",
+            }
+            final_disp = final_disp.rename(columns=final_rename)
+
             final_disp.to_excel(writer, sheet_name="Top_Final_10", startrow=1)
 
-        # 5) Top_Sector_Leaders (top 3 per sector by composite_score)
+            # Build a Lite view for non-experts
+            wanted_cols = [
+                "Sector",
+                "Final_Composite_Score",
+                "Trend_Strength_Score",
+                "1W %",
+                "1M %",
+                "3M %",
+                "6M %",
+                "Is_Trend_Accelerating",
+                "Is_Strong_Trend_Pulled_Back",
+                "Above_200_Day_MA",
+            ]
+            lite_cols = [c for c in wanted_cols if c in final_disp.columns]
+            lite_disp = final_disp[lite_cols]
+            lite_disp.to_excel(writer, sheet_name="Top_Final_10_Lite", startrow=1)
+
+        # 5) Top_Sector_Leaders (simplified but still more advanced)
         if top_sector_df is not None and not top_sector_df.empty:
             sector_disp = top_sector_df.copy()
+
             for c in ["1w", "1m", "3m", "6m"]:
                 if c in sector_disp.columns:
                     sector_disp[c] = sector_disp[c] / 100.0
+
+            for col in ["new_momentum_flag", "pullback_flag", "above_50d", "above_200d"]:
+                if col in sector_disp.columns:
+                    sector_disp[col] = sector_disp[col].map(_yes_no_map)
+
+            sector_rename = {
+                "composite_score": "Trend_Strength_Score",
+                "risk_adj_score": "Risk_Adjusted_6M",
+                "risk_adj_pct": "Risk_Adjusted_Percentile",
+                "new_momentum_flag": "Is_Trend_Accelerating",
+                "pullback_flag": "Is_Strong_Trend_Pulled_Back",
+                "above_50d": "Above_50_Day_MA",
+                "above_200d": "Above_200_Day_MA",
+                "sector": "Sector",
+                "1w": "1W %",
+                "1m": "1M %",
+                "3m": "3M %",
+                "6m": "6M %",
+                "final_score": "Final_Composite_Score",
+            }
+            sector_disp = sector_disp.rename(columns=sector_rename)
+
             sector_disp.to_excel(writer, sheet_name="Top_Sector_Leaders", startrow=1)
 
-        # 6) ReadMe sheet explaining each tab + methodology
-        readme_data = {
-            "Sheet": [
-                "Master",
-                "Top_1w",
-                "Top_1m",
-                "Top_3m",
-                "Top_6m",
-                "Top_Trend_10",
-                "Top_Final_10",
-                "Top_Sector_Leaders",
-            ],
-            "Description": [
-                "All tickers with 1-week, 1-month, 3-month, and 6-month total returns, expressed as price-change percentages. One row per ticker.",
-                "Same table as Master, sorted by 1-week return (1W %) from highest to lowest. Top recent weekly performers at the top.",
-                "Same table as Master, sorted by 1-month return (1M %) from highest to lowest.",
-                "Same table as Master, sorted by 3-month return (3M %) from highest to lowest.",
-                "Same table as Master, sorted by 6-month return (6M %) from highest to lowest.",
-                (
-                    "Top 10 'trend candidates' with enriched analytics: composite_score (0–1 multi-horizon strength), "
-                    "per-horizon scores, risk-adjusted 6m return, pullback flag, new momentum flag, moving-average flags, "
-                    "sector, and final_score."
-                ),
-                (
-                    "Top 10 overall recommendations based on final_score, which blends composite_score, risk-adjusted score, "
-                    "new-momentum flag, and pullback flag into one ranking (see note in sheet)."
-                ),
-                (
-                    "Top 3 composite_score leaders in each sector, showing where strength is concentrated across the market."
-                ),
-            ],
-        }
+        # 6) ReadMe sheet explaining each tab in human terms
+        readme_sheets = [
+            "Master",
+            "Top_1w",
+            "Top_1m",
+            "Top_3m",
+            "Top_6m",
+            "Top_Trend_10",
+            "Top_Final_10_Lite",
+            "Top_Final_10",
+            "Top_Sector_Leaders",
+        ]
+        readme_desc = [
+            "All stocks with 1-week, 1-month, 3-month, and 6-month returns. This is the base data.",
+            "Same as Master, sorted by 1-week return (best recent week at the top).",
+            "Same as Master, sorted by 1-month return.",
+            "Same as Master, sorted by 3-month return.",
+            "Same as Master, sorted by 6-month return.",
+            "Top 10 multi-horizon trend leaders with detailed scores, risk, sector, and trend health.",
+            "Simple view for non-experts: top 10 overall ideas with sector, scores, returns, and easy Yes/No flags.",
+            "Full detail view of the final top 10 ideas with all advanced columns.",
+            "Top 3 leaders in each sector based on trend strength, to see where leadership is concentrated.",
+        ]
+        readme_data = {"Sheet": readme_sheets, "Description": readme_desc}
         pd.DataFrame(readme_data).to_excel(writer, sheet_name="ReadMe", index=False)
 
         wb = writer.book
@@ -562,23 +646,22 @@ def save_report(
         if "Top_Trend_10" in wb.sheetnames:
             ws = wb["Top_Trend_10"]
             note_text = (
-                "Note: composite_score is the average of 1W/1M/3M/6M percentile scores (0–1), "
-                "where each percentile reflects this stock's rank vs the full universe for that horizon "
-                "(1.0 = top performer, 0.0 = bottom). risk_adj_score is 6M return divided by 6M volatility. "
-                "new_momentum_flag and pullback_flag are binary signals; final_score combines these into one view."
+                "Note: Trend_Strength_Score shows how strong this stock's performance has been across 1W, 1M, 3M, and 6M "
+                "compared to the full list (closer to 100% = stronger). 'Is_Trend_Accelerating' and 'Is_Strong_Trend_Pulled_Back' "
+                "are simple Yes/No flags to indicate whether momentum is picking up or a strong trend has recently dipped."
             )
             ws["A1"] = note_text
             max_merge_col = min(10, ws.max_column if ws.max_column else 10)
             ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max_merge_col)
             ws["A1"].alignment = Alignment(wrap_text=True, vertical="top")
 
-        if "Top_Final_10" in wb.sheetnames:
-            ws = wb["Top_Final_10"]
+        if "Top_Final_10_Lite" in wb.sheetnames:
+            ws = wb["Top_Final_10_Lite"]
             note_text = (
-                "Note: final_score = 0.4 * composite_score + 0.3 * risk_adj_percentile "
-                "+ 0.2 * new_momentum_flag + 0.1 * pullback_flag. Higher is better. "
-                "This is an integrated ranking meant to highlight the most compelling "
-                "early trend candidates to consider."
+                "Simple top-10 list for non-experts. Focus on: Final_Composite_Score (higher = more attractive), "
+                "the 1W/1M/3M/6M returns, and the Yes/No flags. "
+                "'Is_Trend_Accelerating' = momentum picking up. "
+                "'Is_Strong_Trend_Pulled_Back' = strong multi-month trend that has recently dipped."
             )
             ws["A1"] = note_text
             max_merge_col = min(10, ws.max_column if ws.max_column else 10)
@@ -588,24 +671,26 @@ def save_report(
         if "Top_Sector_Leaders" in wb.sheetnames:
             ws = wb["Top_Sector_Leaders"]
             note_text = (
-                "Note: shows the top 3 tickers in each sector by composite_score, "
-                "helping you see where leadership is concentrated across the market."
+                "Shows the strongest names in each sector based on trend strength. "
+                "Use this to see which sectors are leading the market and to avoid over-concentrating in a single theme."
             )
             ws["A1"] = note_text
             max_merge_col = min(8, ws.max_column if ws.max_column else 8)
             ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max_merge_col)
             ws["A1"].alignment = Alignment(wrap_text=True, vertical="top")
 
-        # ----- Apply % formatting to numeric cells on return sheets -----
+        # ----- Apply % formatting ONLY to obvious percentage columns -----
+        percent_like_keywords = ["%", "Score", "Percentile"]
         for ws in wb.worksheets:
             if ws.title in ("ReadMe",):
                 continue
-            # Headers are in row 1 or 2 depending on sheet:
-            # - Master / Top_1w/...: header row 1, data from row 2
-            # - Top_* custom tabs: we started at row 2, so data from row 2 as well
-            for row in ws.iter_rows(min_row=2, min_col=2):
+            headers = {cell.column: cell.value for cell in ws[2]}  # row 2 is header row
+            for row in ws.iter_rows(min_row=3, min_col=2):
                 for cell in row:
-                    if isinstance(cell.value, (int, float)):
+                    header = headers.get(cell.column, "")
+                    if isinstance(cell.value, (int, float)) and any(
+                        kw in str(header) for kw in percent_like_keywords
+                    ):
                         cell.number_format = "0.00%"
 
     print(f"[OUT] Excel report saved to {excel_path}")
@@ -660,17 +745,13 @@ def main():
     analytics = analytics.join(pullback_flag, how="left")
     analytics = analytics.join(new_mom_flag, how="left")
     analytics = analytics.join(sectors, how="left")
-
-    # MA flags have index = ticker
     analytics = analytics.join(ma_flags, how="left")
-
-    # Add raw returns to analytics (for context)
     analytics = analytics.join(returns_df, how="left")
 
     # 11) Final combined score
     analytics = compute_final_scores(analytics)
 
-    # Positive horizons filter (same idea as before: avoid garbage)
+    # Filter out junky names: at least 2 positive horizons
     positive_horizons = (returns_df > 0).sum(axis=1) >= 2
 
     # 12) Top trend (by composite_score)
@@ -735,46 +816,64 @@ def main():
 
 
 # ------------------------------------------------------------------
-# 8) OPTIONAL: Copy outputs to Drive / local folders (your old block)
+# 8) OPTIONAL: Copy outputs to Drive / local folders (Windows-safe)
 # ------------------------------------------------------------------
 try:
-    import os, shutil
+    import os, shutil, time
 
+    def safe_copy(src, dst, max_retries=5, delay=1.0):
+        """
+        Copy file with retries to avoid Windows 'file in use' (WinError 32).
+        """
+        for attempt in range(1, max_retries + 1):
+            try:
+                shutil.copy2(src, dst)
+                print(f"[COPY] {src} -> {dst}")
+                return
+            except PermissionError as e:
+                msg = str(e)
+                if "being used by another process" in msg or "WinError 32" in msg:
+                    if attempt < max_retries:
+                        print(f"[WARN] {src} locked (attempt {attempt}/{max_retries}). Retrying in {delay}s...")
+                        time.sleep(delay)
+                        continue
+                    else:
+                        print(f"[WARN] Gave up copying {src} after {max_retries} attempts.")
+                        return
+                else:
+                    print(f"[WARN] Could not copy {src} -> {dst}: {e}")
+                    return
+            except Exception as e:
+                print(f"[WARN] Could not copy {src} -> {dst}: {e}")
+                return
+
+    # Collect existing output files
     files_to_copy = []
     if os.path.exists(MASTER_CSV):
         files_to_copy.append(MASTER_CSV)
     if os.path.exists(EXCEL_REPORT):
         files_to_copy.append(EXCEL_REPORT)
 
+    # A) Copy to your Windows project folder
     windows_project_folder = r"C:\Users\Tommy\top_stock_returns"
     if os.path.isdir(windows_project_folder):
         for fname in files_to_copy:
             dst = os.path.join(windows_project_folder, os.path.basename(fname))
-            try:
-                shutil.copy2(fname, dst)
-                print(f"[COPY] {fname} -> {dst}")
-            except Exception as e:
-                print(f"[WARN] Could not copy {fname} to local folder: {e}")
+            safe_copy(fname, dst)
 
+    # B) Copy to Google Drive on Windows (G:)
     windows_drive_path = r"G:\My Drive\Top Stocks Output"
     if os.path.isdir(windows_drive_path):
         for fname in files_to_copy:
             dst = os.path.join(windows_drive_path, os.path.basename(fname))
-            try:
-                shutil.copy2(fname, dst)
-                print(f"[COPY] {fname} -> {dst}")
-            except Exception as e:
-                print(f"[WARN] Could not copy {fname} to Windows Drive: {e}")
+            safe_copy(fname, dst)
 
+    # C) Copy to Colab Google Drive folder (if running in Google Colab)
     colab_drive_path = "/content/drive/MyDrive/Top Stocks Output"
     if os.path.isdir(colab_drive_path):
         for fname in files_to_copy:
             dst = os.path.join(colab_drive_path, os.path.basename(fname))
-            try:
-                shutil.copy2(fname, dst)
-                print(f"[COPY] {fname} -> {dst}")
-            except Exception as e:
-                print(f"[WARN] Could not copy {fname} to Colab Drive: {e}")
+            safe_copy(fname, dst)
 
 except Exception as outer_err:
     print(f"[WARN] Output copy step failed: {outer_err}")
