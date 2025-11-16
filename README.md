@@ -121,7 +121,7 @@ A simple English explanation of every column.
 
 ---
 
-## ❤️ Why This Exists
+## Why This Exists
 
 To help regular people:
 
