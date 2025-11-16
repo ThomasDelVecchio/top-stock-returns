@@ -3,8 +3,7 @@
 import pandas as pd
 import yfinance as yf
 from datetime import timedelta
-from math import sqrt
-from openpyxl.styles import Alignment  # for Excel note formatting
+from openpyxl.styles import Alignment
 
 # ==========================================================
 # CONFIG
@@ -444,7 +443,7 @@ def compute_final_scores(analytics_df):
 
 
 # ==========================================================
-# 4) RANKED VIEWS + SAVING (HUMAN-FRIENDLY SHEETS)
+# 4) RANKED VIEWS (NOW ONLY USED FOR CONSOLE)
 # ==========================================================
 def build_ranked_views(returns_df):
     ranked_views = {}
@@ -461,9 +460,12 @@ def _yes_no_map(val):
     return "No"
 
 
+# ==========================================================
+# 5) SAVE REPORT (CONSOLIDATED TABS)
+# ==========================================================
 def save_report(
     returns_df,
-    ranked_views,
+    ranked_views,   # kept for compatibility, not used for separate tabs anymore
     top_trend_df,
     top_final_df,
     top_sector_df,
@@ -488,21 +490,31 @@ def save_report(
     # For Excel, convert returns to decimal (0.1234) for % formatting
     def display_returns(df):
         df_disp = df.copy() / 100.0
-        df_disp.columns = ["1W %", "1M %", "3M %", "6M %"]
+        df_disp.columns = ["1W Return", "1M Return", "3M Return", "6M Return"]
         return df_disp
 
     with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
-        # 1) Master sheet
-        display_returns(returns_df).to_excel(writer, sheet_name="Master")
+        # 1) Master sheet (startrow=1 → row1 for legend, row2 for header)
+        display_returns(returns_df).to_excel(writer, sheet_name="Master", startrow=1)
 
-        # 2) Horizon sheets
-        for horizon, df_view in ranked_views.items():
-            sheet_name = f"Top_{horizon}"
-            display_returns(df_view).to_excel(writer, sheet_name=sheet_name)
-
-        # 3) Top_Trend_10 (enriched, but renamed & cleaned)
+        # 2) Top_Trend_10 (enriched, but renamed & cleaned)
         if top_trend_df is not None and not top_trend_df.empty:
-            trend_disp = top_trend_df.copy()
+            trend_cols = [
+                "sector",
+                "composite_score",
+                "risk_adj_score",
+                "risk_adj_pct",
+                "new_momentum_flag",
+                "pullback_flag",
+                "above_50d",
+                "above_200d",
+                "1w",
+                "1m",
+                "3m",
+                "6m",
+            ]
+            trend_cols = [c for c in trend_cols if c in top_trend_df.columns]
+            trend_disp = top_trend_df[trend_cols].copy()
 
             # Convert returns to decimals
             for c in ["1w", "1m", "3m", "6m"]:
@@ -514,30 +526,75 @@ def save_report(
                 if col in trend_disp.columns:
                     trend_disp[col] = trend_disp[col].map(_yes_no_map)
 
-            # Rename columns to be readable
+            # Rename columns to be simple phrases
             trend_rename = {
-                "composite_score": "Trend_Strength_Score",
-                "risk_adj_score": "Risk_Adjusted_6M",
-                "risk_adj_pct": "Risk_Adjusted_Percentile",
-                "new_momentum_flag": "Is_Trend_Accelerating",
-                "pullback_flag": "Is_Strong_Trend_Pulled_Back",
-                "above_50d": "Above_50_Day_MA",
-                "above_200d": "Above_200_Day_MA",
                 "sector": "Sector",
-                "1w": "1W %",
-                "1m": "1M %",
-                "3m": "3M %",
-                "6m": "6M %",
-                "final_score": "Final_Composite_Score",
+                "composite_score": "Trend Score",
+                "risk_adj_score": "Risk-Adjusted Strength",
+                "risk_adj_pct": "Risk-Adjusted Rank",
+                "new_momentum_flag": "Speeding Up?",
+                "pullback_flag": "Recent Pullback?",
+                "above_50d": "Short-Term Trend Healthy?",
+                "above_200d": "Long-Term Trend Healthy?",
+                "1w": "1W Return",
+                "1m": "1M Return",
+                "3m": "3M Return",
+                "6m": "6M Return",
             }
             trend_disp = trend_disp.rename(columns=trend_rename)
 
             trend_disp.to_excel(writer, sheet_name="Top_Trend_10", startrow=1)
 
-        # 4) Top_Final_10 (full info, readable names)
-        lite_disp = None
+        # 3) Top_Sector_Leaders (simple but informative)
+        if top_sector_df is not None and not top_sector_df.empty:
+            sector_cols = [
+                "sector",
+                "composite_score",
+                "final_score",
+                "1w",
+                "1m",
+                "3m",
+                "6m",
+            ]
+            sector_cols = [c for c in sector_cols if c in top_sector_df.columns]
+            sector_disp = top_sector_df[sector_cols].copy()
+
+            for c in ["1w", "1m", "3m", "6m"]:
+                if c in sector_disp.columns:
+                    sector_disp[c] = sector_disp[c] / 100.0
+
+            sector_rename = {
+                "sector": "Sector",
+                "composite_score": "Trend Score",
+                "final_score": "Final Score",
+                "1w": "1W Return",
+                "1m": "1M Return",
+                "3m": "3M Return",
+                "6m": "6M Return",
+            }
+            sector_disp = sector_disp.rename(columns=sector_rename)
+
+            sector_disp.to_excel(writer, sheet_name="Top_Sector_Leaders", startrow=1)
+
+        # 4) Top_Final_10 (SINGLE final recommendation sheet, last analysis tab)
         if top_final_df is not None and not top_final_df.empty:
-            final_disp = top_final_df.copy()
+            final_cols = [
+                "sector",
+                "composite_score",
+                "risk_adj_score",
+                "risk_adj_pct",
+                "new_momentum_flag",
+                "pullback_flag",
+                "above_50d",
+                "above_200d",
+                "final_score",
+                "1w",
+                "1m",
+                "3m",
+                "6m",
+            ]
+            final_cols = [c for c in final_cols if c in top_final_df.columns]
+            final_disp = top_final_df[final_cols].copy()
 
             for c in ["1w", "1m", "3m", "6m"]:
                 if c in final_disp.columns:
@@ -548,143 +605,103 @@ def save_report(
                     final_disp[col] = final_disp[col].map(_yes_no_map)
 
             final_rename = {
-                "composite_score": "Trend_Strength_Score",
-                "risk_adj_score": "Risk_Adjusted_6M",
-                "risk_adj_pct": "Risk_Adjusted_Percentile",
-                "new_momentum_flag": "Is_Trend_Accelerating",
-                "pullback_flag": "Is_Strong_Trend_Pulled_Back",
-                "above_50d": "Above_50_Day_MA",
-                "above_200d": "Above_200_Day_MA",
                 "sector": "Sector",
-                "1w": "1W %",
-                "1m": "1M %",
-                "3m": "3M %",
-                "6m": "6M %",
-                "final_score": "Final_Composite_Score",
+                "composite_score": "Trend Score",
+                "risk_adj_score": "Risk-Adjusted Strength",
+                "risk_adj_pct": "Risk-Adjusted Rank",
+                "new_momentum_flag": "Speeding Up?",
+                "pullback_flag": "Recent Pullback?",
+                "above_50d": "Short-Term Trend Healthy?",
+                "above_200d": "Long-Term Trend Healthy?",
+                "final_score": "Final Score",
+                "1w": "1W Return",
+                "1m": "1M Return",
+                "3m": "3M Return",
+                "6m": "6M Return",
             }
             final_disp = final_disp.rename(columns=final_rename)
 
+            # Order columns in a logical way:
+            ordered_cols = [
+                "Sector",
+                "Final Score",
+                "Trend Score",
+                "Risk-Adjusted Strength",
+                "Risk-Adjusted Rank",
+                "1W Return",
+                "1M Return",
+                "3M Return",
+                "6M Return",
+                "Short-Term Trend Healthy?",
+                "Long-Term Trend Healthy?",
+                "Speeding Up?",
+                "Recent Pullback?",
+            ]
+            final_disp = final_disp[[c for c in ordered_cols if c in final_disp.columns]]
+
             final_disp.to_excel(writer, sheet_name="Top_Final_10", startrow=1)
 
-            # Build a Lite view for non-experts
-            wanted_cols = [
-                "Sector",
-                "Final_Composite_Score",
-                "Trend_Strength_Score",
-                "1W %",
-                "1M %",
-                "3M %",
-                "6M %",
-                "Is_Trend_Accelerating",
-                "Is_Strong_Trend_Pulled_Back",
-                "Above_200_Day_MA",
-            ]
-            lite_cols = [c for c in wanted_cols if c in final_disp.columns]
-            lite_disp = final_disp[lite_cols]
-            lite_disp.to_excel(writer, sheet_name="Top_Final_10_Lite", startrow=1)
-
-        # 5) Top_Sector_Leaders (simplified but still more advanced)
-        if top_sector_df is not None and not top_sector_df.empty:
-            sector_disp = top_sector_df.copy()
-
-            for c in ["1w", "1m", "3m", "6m"]:
-                if c in sector_disp.columns:
-                    sector_disp[c] = sector_disp[c] / 100.0
-
-            for col in ["new_momentum_flag", "pullback_flag", "above_50d", "above_200d"]:
-                if col in sector_disp.columns:
-                    sector_disp[col] = sector_disp[col].map(_yes_no_map)
-
-            sector_rename = {
-                "composite_score": "Trend_Strength_Score",
-                "risk_adj_score": "Risk_Adjusted_6M",
-                "risk_adj_pct": "Risk_Adjusted_Percentile",
-                "new_momentum_flag": "Is_Trend_Accelerating",
-                "pullback_flag": "Is_Strong_Trend_Pulled_Back",
-                "above_50d": "Above_50_Day_MA",
-                "above_200d": "Above_200_Day_MA",
-                "sector": "Sector",
-                "1w": "1W %",
-                "1m": "1M %",
-                "3m": "3M %",
-                "6m": "6M %",
-                "final_score": "Final_Composite_Score",
-            }
-            sector_disp = sector_disp.rename(columns=sector_rename)
-
-            sector_disp.to_excel(writer, sheet_name="Top_Sector_Leaders", startrow=1)
-
-        # 6) ReadMe sheet explaining each tab in human terms
+        # 5) ReadMe sheet explaining each tab in simple terms
         readme_sheets = [
             "Master",
-            "Top_1w",
-            "Top_1m",
-            "Top_3m",
-            "Top_6m",
             "Top_Trend_10",
-            "Top_Final_10_Lite",
-            "Top_Final_10",
             "Top_Sector_Leaders",
+            "Top_Final_10",
         ]
         readme_desc = [
-            "All stocks with 1-week, 1-month, 3-month, and 6-month returns. This is the base data.",
-            "Same as Master, sorted by 1-week return (best recent week at the top).",
-            "Same as Master, sorted by 1-month return.",
-            "Same as Master, sorted by 3-month return.",
-            "Same as Master, sorted by 6-month return.",
-            "Top 10 multi-horizon trend leaders with detailed scores, risk, sector, and trend health.",
-            "Simple view for non-experts: top 10 overall ideas with sector, scores, returns, and easy Yes/No flags.",
-            "Full detail view of the final top 10 ideas with all advanced columns.",
-            "Top 3 leaders in each sector based on trend strength, to see where leadership is concentrated.",
+            "All stocks with 1-week, 1-month, 3-month, and 6-month returns. You can sort any column directly in Excel to see the top performers over that time period.",
+            "Top 10 stocks with strong performance across multiple time frames, plus trend health and simple Yes/No flags.",
+            "Best names in each sector based on trend strength and returns.",
+            "Final top 10 stock ideas based on overall score, trend strength, risk-adjusted results, and simple Yes/No signals.",
         ]
         readme_data = {"Sheet": readme_sheets, "Description": readme_desc}
         pd.DataFrame(readme_data).to_excel(writer, sheet_name="ReadMe", index=False)
 
         wb = writer.book
 
-        # ----- Add explanatory notes -----
-        if "Top_Trend_10" in wb.sheetnames:
-            ws = wb["Top_Trend_10"]
-            note_text = (
-                "Note: Trend_Strength_Score shows how strong this stock's performance has been across 1W, 1M, 3M, and 6M "
-                "compared to the full list (closer to 100% = stronger). 'Is_Trend_Accelerating' and 'Is_Strong_Trend_Pulled_Back' "
-                "are simple Yes/No flags to indicate whether momentum is picking up or a strong trend has recently dipped."
-            )
-            ws["A1"] = note_text
-            max_merge_col = min(10, ws.max_column if ws.max_column else 10)
-            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max_merge_col)
-            ws["A1"].alignment = Alignment(wrap_text=True, vertical="top")
+        # ----- Legends / notes on each key sheet -----
+        sheet_notes = {
+            "Master": (
+                "Each row is a stock. Columns show how much the stock price has changed over the past 1 week, 1 month, "
+                "3 months, and 6 months (as percentage returns). You can sort any of these columns to see the top "
+                "performers over that time period."
+            ),
+            "Top_Trend_10": (
+                "Top 10 stocks based on how strong and consistent their performance has been across 1W, 1M, 3M, and 6M. "
+                "Trend Score = overall strength across time frames. "
+                "Risk-Adjusted fields show strength while considering volatility. "
+                "'Short-Term Trend Healthy?' and 'Long-Term Trend Healthy?' indicate whether the price is above key "
+                "short-term and long-term trend lines. 'Speeding Up?' and 'Recent Pullback?' are simple Yes/No signals "
+                "for accelerating trends or dips after strong runs."
+            ),
+            "Top_Sector_Leaders": (
+                "Shows the strongest names in each sector based on trend strength and returns. This helps you see which "
+                "sectors are leading the market."
+            ),
+            "Top_Final_10": (
+                "Final top 10 stock ideas. 'Final Score' combines trend strength, risk-adjusted strength, and the Yes/No "
+                "signals into one overall rating. Use Sector, the return columns, and the Yes/No fields to understand why "
+                "each stock ranks where it does."
+            ),
+        }
 
-        if "Top_Final_10_Lite" in wb.sheetnames:
-            ws = wb["Top_Final_10_Lite"]
-            note_text = (
-                "Simple top-10 list for non-experts. Focus on: Final_Composite_Score (higher = more attractive), "
-                "the 1W/1M/3M/6M returns, and the Yes/No flags. "
-                "'Is_Trend_Accelerating' = momentum picking up. "
-                "'Is_Strong_Trend_Pulled_Back' = strong multi-month trend that has recently dipped."
-            )
-            ws["A1"] = note_text
-            max_merge_col = min(10, ws.max_column if ws.max_column else 10)
-            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max_merge_col)
-            ws["A1"].alignment = Alignment(wrap_text=True, vertical="top")
-
-        if "Top_Sector_Leaders" in wb.sheetnames:
-            ws = wb["Top_Sector_Leaders"]
-            note_text = (
-                "Shows the strongest names in each sector based on trend strength. "
-                "Use this to see which sectors are leading the market and to avoid over-concentrating in a single theme."
-            )
-            ws["A1"] = note_text
-            max_merge_col = min(8, ws.max_column if ws.max_column else 8)
-            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max_merge_col)
-            ws["A1"].alignment = Alignment(wrap_text=True, vertical="top")
+        # Add notes to sheets and wrap text
+        for ws in wb.worksheets:
+            title = ws.title
+            if title in sheet_notes:
+                note_text = sheet_notes[title]
+                ws["A1"] = note_text
+                max_merge_col = min(10, ws.max_column if ws.max_column else 10)
+                ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max_merge_col)
+                ws["A1"].alignment = Alignment(wrap_text=True, vertical="top")
 
         # ----- Apply % formatting ONLY to obvious percentage columns -----
-        percent_like_keywords = ["%", "Score", "Percentile"]
+        percent_like_keywords = ["Return", "Score", "Rank"]
         for ws in wb.worksheets:
             if ws.title in ("ReadMe",):
                 continue
-            headers = {cell.column: cell.value for cell in ws[2]}  # row 2 is header row
+            # Row 2 is header (since we used startrow=1)
+            headers = {cell.column: cell.value for cell in ws[2]}
             for row in ws.iter_rows(min_row=3, min_col=2):
                 for cell in row:
                     header = headers.get(cell.column, "")
@@ -721,7 +738,7 @@ def main():
     returns_df = compute_horizon_returns(prices, HORIZONS_DAYS)
     returns_df = returns_df.dropna(how="all")
 
-    # 4) Base ranked views
+    # 4) Base ranked views (used for console preview only now)
     ranked_views = build_ranked_views(returns_df)
 
     # 5) Trend scores (all tickers)
@@ -783,7 +800,7 @@ def main():
     # 15) Console preview
     print_top_snippets(returns_df, top_n=20)
     if not top_final_df.empty:
-        print("\n=========== TOP 10 FINAL RECOMMENDATIONS (final_score desc) ===========")
+        print("\n=========== TOP 10 FINAL RECOMMENDATIONS (Final Score desc) ===========")
         cols_to_show = [
             "final_score",
             "composite_score",
