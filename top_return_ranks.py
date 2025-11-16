@@ -3,6 +3,8 @@
 import pandas as pd
 import yfinance as yf
 from datetime import timedelta
+from math import sqrt
+from openpyxl.styles import Alignment  # for Excel note formatting
 
 # ==========================================================
 # CONFIG
@@ -202,7 +204,6 @@ def download_price_history_batched(tickers, period=YFINANCE_PERIOD, batch_size=Y
     return prices
 
 
-
 # ==========================================================
 # 3) COMPUTE HORIZON RETURNS
 # ==========================================================
@@ -239,61 +240,216 @@ def compute_horizon_returns(prices, horizons_days):
 
 
 # ==========================================================
-# 3b) TREND CANDIDATES (TOP 10)
+# 3b) TREND SCORES (ALL TICKERS)
 # ==========================================================
-def compute_trend_candidates(returns_df, min_positive_horizons=2, top_k=10):
+def compute_trend_scores(returns_df):
     """
-    Build a composite 'trendiness' score per ticker:
+    Compute per-horizon percentile scores and composite_score for ALL tickers.
 
-      1) Rank each ticker within each horizon (higher return = better rank)
-      2) Convert ranks into percentile scores between 0 and 1
-         (1.0 = top performer, 0.0 = bottom)
-      3) Average percentile scores across horizons -> composite_score
-      4) Require at least `min_positive_horizons` horizons with >0% return
-      5) Return top_k tickers by composite_score
-
-    Returns DataFrame indexed by ticker, with columns:
-      - per-horizon percentile scores: 1w_score, 1m_score, 3m_score, 6m_score
-      - composite_score
-      - raw returns per horizon: 1w, 1m, 3m, 6m
+    Returns DataFrame with columns:
+      1w_score, 1m_score, 3m_score, 6m_score, composite_score
     """
     if returns_df.empty:
         return pd.DataFrame()
 
     df = returns_df.copy()
     n = len(df)
-    rank_pct = pd.DataFrame(index=df.index)
+    scores = pd.DataFrame(index=df.index)
 
-    # Per-horizon percentile scores with "_score" suffix
     if n > 1:
         for col in df.columns:
             ranks = df[col].rank(ascending=False, method="average")
-            # percentile: top rank -> 1.0, bottom -> 0.0
-            rank_pct[f"{col}_score"] = 1.0 - (ranks - 1.0) / (n - 1.0)
+            scores[f"{col}_score"] = 1.0 - (ranks - 1.0) / (n - 1.0)
     else:
         for col in df.columns:
-            rank_pct[f"{col}_score"] = 1.0
+            scores[f"{col}_score"] = 1.0
 
-    score_cols = [c for c in rank_pct.columns if c.endswith("_score")]
-    rank_pct["composite_score"] = rank_pct[score_cols].mean(axis=1)
+    score_cols = [c for c in scores.columns if c.endswith("_score")]
+    scores["composite_score"] = scores[score_cols].mean(axis=1)
 
-    # require at least X horizons with positive return
-    pos_mask = (df > 0).sum(axis=1) >= min_positive_horizons
-    filtered = rank_pct[pos_mask]
-
-    if filtered.empty:
-        return pd.DataFrame()
-
-    top = filtered.sort_values("composite_score", ascending=False).head(top_k)
-
-    # join back raw returns (1w, 1m, 3m, 6m) – no name collision now
-    top_full = top.join(df, how="left")
-
-    return top_full
+    return scores
 
 
 # ==========================================================
-# 4) RANKED VIEWS + SAVING (NICER DISPLAY + README + TREND TAB)
+# 3c) VOLATILITY & RISK-ADJUSTED SCORE
+# ==========================================================
+def compute_vol_and_risk_adjusted(prices, returns_df):
+    """
+    Compute simple daily-vol-based risk adjustment:
+
+      vol_6m = std dev of daily returns over last ~6m
+      risk_adj_score = (6m_return% / 100) / vol_6m
+
+    Returns DataFrame with vol_6m and risk_adj_score.
+    """
+    if prices.empty or returns_df.empty:
+        return pd.DataFrame(index=returns_df.index)
+
+    prices = prices.sort_index()
+    last_date = prices.index.max()
+    anchor_date = last_date - timedelta(days=HORIZONS_DAYS["6m"])
+    price_6m = prices[prices.index >= anchor_date]
+
+    daily_rets = price_6m.pct_change().dropna()
+    vol_6m = daily_rets.std()  # per ticker, fraction (e.g. 0.02 = 2% daily)
+
+    out = pd.DataFrame(index=returns_df.index)
+    out["vol_6m"] = vol_6m.reindex(returns_df.index)
+
+    # convert 6m % return to fraction
+    sixm_frac = returns_df["6m"] / 100.0
+    out["risk_adj_score"] = sixm_frac / out["vol_6m"]
+    out["risk_adj_score"] = out["risk_adj_score"].replace([pd.NA, pd.NaT], pd.NA)
+
+    return out
+
+
+# ==========================================================
+# 3d) MOVING AVERAGE FLAGS (50d / 200d)
+# ==========================================================
+def compute_ma_flags(prices):
+    """
+    Compute 50d and 200d simple moving averages and flags:
+      above_50d, above_200d (True/False)
+    """
+    if prices.empty:
+        return pd.DataFrame()
+
+    prices = prices.sort_index()
+    ma50 = prices.rolling(window=50).mean()
+    ma200 = prices.rolling(window=200).mean()
+
+    last_price = prices.iloc[-1]
+    last_ma50 = ma50.iloc[-1]
+    last_ma200 = ma200.iloc[-1]
+
+    out = pd.DataFrame(index=prices.columns)
+    out.index.name = "ticker"
+    out["above_50d"] = last_price > last_ma50
+    out["above_200d"] = last_price > last_ma200
+
+    return out
+
+
+# ==========================================================
+# 3e) PULLBACK & NEW-MOMENTUM FLAGS
+# ==========================================================
+def compute_pullback_flag(returns_df,
+                          min_3m=25.0,
+                          min_6m=40.0):
+    """
+    Pullback idea:
+      - Strong 3m and 6m trend
+      - Recent 1w or 1m <= 0 (dip in a strong uptrend)
+    """
+    df = returns_df.copy()
+    strong = (df["3m"] >= min_3m) & (df["6m"] >= min_6m)
+    recent_dip = (df["1w"] <= 0.0) | (df["1m"] <= 0.0)
+    flag = strong & recent_dip
+    return flag.rename("pullback_flag")
+
+
+def compute_new_momentum_flag(returns_df):
+    """
+    New momentum idea:
+      - shorter horizons stronger than longer ones, roughly:
+          1m >= 3m/3
+          3m >= 6m/3
+      - and all positive
+    This is intentionally loose: you're just looking for acceleration.
+    """
+    df = returns_df.copy()
+    all_pos = (df["1w"] > 0) & (df["1m"] > 0) & (df["3m"] > 0) & (df["6m"] > 0)
+
+    # acceleration-ish: recent annualized-ish > longer
+    cond_1 = df["1m"] >= df["3m"] / 3.0
+    cond_2 = df["3m"] >= df["6m"] / 3.0
+
+    flag = all_pos & cond_1 & cond_2
+    return flag.rename("new_momentum_flag")
+
+
+# ==========================================================
+# 3f) SECTOR LOOKUP
+# ==========================================================
+def fetch_sectors_for_tickers(tickers):
+    """
+    Best effort sector lookup via yfinance.Ticker(info).
+    For performance, this loops per ticker; it's fine for small top lists,
+    and acceptable for 1k if you don't run it constantly.
+    """
+    sectors = {}
+    print("[STEP] Fetching sectors from Yahoo (best effort)...")
+    for t in tickers:
+        ysym = to_yahoo_symbol(t)
+        try:
+            info = yf.Ticker(ysym).info
+            sector = info.get("sector", "Unknown")
+        except Exception:
+            sector = "Unknown"
+        sectors[t] = sector
+    return pd.Series(sectors, name="sector")
+
+
+# ==========================================================
+# 3g) FINAL SCORE (COMBINED VIEW)
+# ==========================================================
+def compute_final_scores(analytics_df):
+    """
+    Combine multiple signals into a single final_score:
+
+      Inputs (per ticker):
+        composite_score  (0–1)
+        risk_adj_score   (numeric, risk-adjusted 6m return)
+        new_momentum_flag (bool)
+        pullback_flag     (bool)
+
+      Steps:
+        - Convert risk_adj_score into a 0–1 percentile (risk_adj_pct)
+        - Flags -> 0/1
+        - final_score = 0.4 * composite_score
+                        + 0.3 * risk_adj_pct
+                        + 0.2 * new_mom_flag
+                        + 0.1 * pullback_flag
+    """
+    df = analytics_df.copy()
+    n = len(df)
+    if n == 0:
+        df["final_score"] = pd.NA
+        return df
+
+    # Risk-adjusted percentile (higher is better)
+    if "risk_adj_score" in df.columns and df["risk_adj_score"].notna().any():
+        ranks = df["risk_adj_score"].rank(ascending=False, method="average")
+        if n > 1:
+            df["risk_adj_pct"] = 1.0 - (ranks - 1.0) / (n - 1.0)
+        else:
+            df["risk_adj_pct"] = 1.0
+    else:
+        df["risk_adj_pct"] = 0.0
+
+    # Flags to 0/1
+    for col in ["new_momentum_flag", "pullback_flag"]:
+        if col in df.columns:
+            df[col] = df[col].fillna(False).astype(int)
+        else:
+            df[col] = 0
+
+    # Composite is already 0–1
+    df["composite_score"] = df["composite_score"].fillna(0.0)
+
+    df["final_score"] = (
+        0.4 * df["composite_score"]
+        + 0.3 * df["risk_adj_pct"]
+        + 0.2 * df["new_momentum_flag"]
+        + 0.1 * df["pullback_flag"]
+    )
+
+    return df
+
+
+# ==========================================================
+# 4) RANKED VIEWS + SAVING (NICER DISPLAY + ALL TABS)
 # ==========================================================
 def build_ranked_views(returns_df):
     ranked_views = {}
@@ -302,7 +458,15 @@ def build_ranked_views(returns_df):
     return ranked_views
 
 
-def save_report(returns_df, ranked_views, trend_df=None, master_csv=MASTER_CSV, excel_path=EXCEL_REPORT):
+def save_report(
+    returns_df,
+    ranked_views,
+    top_trend_df,
+    top_final_df,
+    top_sector_df,
+    master_csv=MASTER_CSV,
+    excel_path=EXCEL_REPORT,
+):
     print("[STEP] Saving master CSV and Excel report...")
 
     # ---------- CSV (keep values as % numbers, not decimal) ----------
@@ -318,41 +482,47 @@ def save_report(returns_df, ranked_views, trend_df=None, master_csv=MASTER_CSV, 
     print(f"[OUT] Master CSV saved to {master_csv}")
 
     # ---------- Excel ----------
-    # For Excel, convert returns to decimal (0.1234) and format as %
-    def display_df(df):
+    # For Excel, convert returns to decimal (0.1234) for % formatting
+    def display_returns(df):
         df_disp = df.copy() / 100.0
         df_disp.columns = ["1W %", "1M %", "3M %", "6M %"]
         return df_disp
 
     with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
         # 1) Master sheet
-        display_df(returns_df).to_excel(writer, sheet_name="Master")
+        display_returns(returns_df).to_excel(writer, sheet_name="Master")
 
         # 2) Horizon sheets
         for horizon, df_view in ranked_views.items():
             sheet_name = f"Top_{horizon}"
-            display_df(df_view).to_excel(writer, sheet_name=sheet_name)
+            display_returns(df_view).to_excel(writer, sheet_name=sheet_name)
 
-        # 3) Trend candidates sheet (Top 10)
-        if trend_df is not None and not trend_df.empty:
-            trend_disp = trend_df.copy()
-            # Convert return columns into decimals for Excel
+        # 3) Top_Trend_10 (enriched)
+        if top_trend_df is not None and not top_trend_df.empty:
+            trend_disp = top_trend_df.copy()
+            # convert return % columns to decimals for Excel
             for c in ["1w", "1m", "3m", "6m"]:
                 if c in trend_disp.columns:
                     trend_disp[c] = trend_disp[c] / 100.0
-            # Rename return columns for display
-            trend_disp = trend_disp.rename(
-                columns={
-                    "1w": "1W %",
-                    "1m": "1M %",
-                    "3m": "3M %",
-                    "6m": "6M %",
-                }
-            )
-            # Keep composite_score as 0–1 (will be formatted as % in Excel)
-            trend_disp.to_excel(writer, sheet_name="Top_Trend_10")
+            trend_disp.to_excel(writer, sheet_name="Top_Trend_10", startrow=1)
 
-        # 4) ReadMe sheet explaining each tab + methodology
+        # 4) Top_Final_10 (overall recommendation)
+        if top_final_df is not None and not top_final_df.empty:
+            final_disp = top_final_df.copy()
+            for c in ["1w", "1m", "3m", "6m"]:
+                if c in final_disp.columns:
+                    final_disp[c] = final_disp[c] / 100.0
+            final_disp.to_excel(writer, sheet_name="Top_Final_10", startrow=1)
+
+        # 5) Top_Sector_Leaders (top 3 per sector by composite_score)
+        if top_sector_df is not None and not top_sector_df.empty:
+            sector_disp = top_sector_df.copy()
+            for c in ["1w", "1m", "3m", "6m"]:
+                if c in sector_disp.columns:
+                    sector_disp[c] = sector_disp[c] / 100.0
+            sector_disp.to_excel(writer, sheet_name="Top_Sector_Leaders", startrow=1)
+
+        # 6) ReadMe sheet explaining each tab + methodology
         readme_data = {
             "Sheet": [
                 "Master",
@@ -361,6 +531,8 @@ def save_report(returns_df, ranked_views, trend_df=None, master_csv=MASTER_CSV, 
                 "Top_3m",
                 "Top_6m",
                 "Top_Trend_10",
+                "Top_Final_10",
+                "Top_Sector_Leaders",
             ],
             "Description": [
                 "All tickers with 1-week, 1-month, 3-month, and 6-month total returns, expressed as price-change percentages. One row per ticker.",
@@ -369,22 +541,68 @@ def save_report(returns_df, ranked_views, trend_df=None, master_csv=MASTER_CSV, 
                 "Same table as Master, sorted by 3-month return (3M %) from highest to lowest.",
                 "Same table as Master, sorted by 6-month return (6M %) from highest to lowest.",
                 (
-                    "Top 10 'trend candidates' based on a composite score across all horizons. "
-                    "For each ticker, we rank it within each horizon (1W, 1M, 3M, 6M), convert ranks "
-                    "into percentile scores (0–1), and average those percentiles into composite_score. "
-                    "Only tickers with positive returns in at least 2 horizons are included, then we "
-                    "take the 10 highest composite_score names."
+                    "Top 10 'trend candidates' with enriched analytics: composite_score (0–1 multi-horizon strength), "
+                    "per-horizon scores, risk-adjusted 6m return, pullback flag, new momentum flag, moving-average flags, "
+                    "sector, and final_score."
+                ),
+                (
+                    "Top 10 overall recommendations based on final_score, which blends composite_score, risk-adjusted score, "
+                    "new-momentum flag, and pullback flag into one ranking (see note in sheet)."
+                ),
+                (
+                    "Top 3 composite_score leaders in each sector, showing where strength is concentrated across the market."
                 ),
             ],
         }
         pd.DataFrame(readme_data).to_excel(writer, sheet_name="ReadMe", index=False)
 
-        # Apply Excel % formatting to numeric cells on all sheets except ReadMe
         wb = writer.book
+
+        # ----- Add explanatory notes -----
+        if "Top_Trend_10" in wb.sheetnames:
+            ws = wb["Top_Trend_10"]
+            note_text = (
+                "Note: composite_score is the average of 1W/1M/3M/6M percentile scores (0–1), "
+                "where each percentile reflects this stock's rank vs the full universe for that horizon "
+                "(1.0 = top performer, 0.0 = bottom). risk_adj_score is 6M return divided by 6M volatility. "
+                "new_momentum_flag and pullback_flag are binary signals; final_score combines these into one view."
+            )
+            ws["A1"] = note_text
+            max_merge_col = min(10, ws.max_column if ws.max_column else 10)
+            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max_merge_col)
+            ws["A1"].alignment = Alignment(wrap_text=True, vertical="top")
+
+        if "Top_Final_10" in wb.sheetnames:
+            ws = wb["Top_Final_10"]
+            note_text = (
+                "Note: final_score = 0.4 * composite_score + 0.3 * risk_adj_percentile "
+                "+ 0.2 * new_momentum_flag + 0.1 * pullback_flag. Higher is better. "
+                "This is an integrated ranking meant to highlight the most compelling "
+                "early trend candidates to consider."
+            )
+            ws["A1"] = note_text
+            max_merge_col = min(10, ws.max_column if ws.max_column else 10)
+            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max_merge_col)
+            ws["A1"].alignment = Alignment(wrap_text=True, vertical="top")
+
+        if "Top_Sector_Leaders" in wb.sheetnames:
+            ws = wb["Top_Sector_Leaders"]
+            note_text = (
+                "Note: shows the top 3 tickers in each sector by composite_score, "
+                "helping you see where leadership is concentrated across the market."
+            )
+            ws["A1"] = note_text
+            max_merge_col = min(8, ws.max_column if ws.max_column else 8)
+            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max_merge_col)
+            ws["A1"].alignment = Alignment(wrap_text=True, vertical="top")
+
+        # ----- Apply % formatting to numeric cells on return sheets -----
         for ws in wb.worksheets:
-            if ws.title == "ReadMe":
+            if ws.title in ("ReadMe",):
                 continue
-            # Data starts at row 2 (row 1 = header), col 2 (col 1 = index "ticker")
+            # Headers are in row 1 or 2 depending on sheet:
+            # - Master / Top_1w/...: header row 1, data from row 2
+            # - Top_* custom tabs: we started at row 2, so data from row 2 as well
             for row in ws.iter_rows(min_row=2, min_col=2):
                 for cell in row:
                     if isinstance(cell.value, (int, float)):
@@ -418,20 +636,100 @@ def main():
     returns_df = compute_horizon_returns(prices, HORIZONS_DAYS)
     returns_df = returns_df.dropna(how="all")
 
-    # 4) Ranked views
+    # 4) Base ranked views
     ranked_views = build_ranked_views(returns_df)
 
-    # 5) Trend candidates (Top 10)
-    trend_df = compute_trend_candidates(returns_df, min_positive_horizons=2, top_k=10)
+    # 5) Trend scores (all tickers)
+    trend_scores = compute_trend_scores(returns_df)
 
-    # 6) Console preview
+    # 6) Vol & risk-adjusted scores
+    vol_risk = compute_vol_and_risk_adjusted(prices, returns_df)
+
+    # 7) Moving-average flags
+    ma_flags = compute_ma_flags(prices)
+
+    # 8) Pullback & new-momentum flags
+    pullback_flag = compute_pullback_flag(returns_df)
+    new_mom_flag = compute_new_momentum_flag(returns_df)
+
+    # 9) Sector (best-effort)
+    sectors = fetch_sectors_for_tickers(returns_df.index)
+
+    # 10) Assemble analytics master DataFrame
+    analytics = trend_scores.join(vol_risk, how="left")
+    analytics = analytics.join(pullback_flag, how="left")
+    analytics = analytics.join(new_mom_flag, how="left")
+    analytics = analytics.join(sectors, how="left")
+
+    # MA flags have index = ticker
+    analytics = analytics.join(ma_flags, how="left")
+
+    # Add raw returns to analytics (for context)
+    analytics = analytics.join(returns_df, how="left")
+
+    # 11) Final combined score
+    analytics = compute_final_scores(analytics)
+
+    # Positive horizons filter (same idea as before: avoid garbage)
+    positive_horizons = (returns_df > 0).sum(axis=1) >= 2
+
+    # 12) Top trend (by composite_score)
+    top_trend_df = (
+        analytics[positive_horizons]
+        .sort_values("composite_score", ascending=False)
+        .head(10)
+    )
+
+    # 13) Top final recommendations (by final_score)
+    top_final_df = (
+        analytics[positive_horizons]
+        .sort_values("final_score", ascending=False)
+        .head(10)
+    )
+
+    # 14) Top sector leaders (top 3 per sector by composite_score)
+    sector_filtered = analytics[positive_horizons & analytics["sector"].notna()]
+    sector_filtered = sector_filtered[sector_filtered["sector"] != "Unknown"]
+    top_sector_list = []
+    for sector, group in sector_filtered.groupby("sector"):
+        top3 = group.sort_values("composite_score", ascending=False).head(3)
+        top_sector_list.append(top3)
+    if top_sector_list:
+        top_sector_df = pd.concat(top_sector_list)
+    else:
+        top_sector_df = pd.DataFrame()
+
+    # 15) Console preview
     print_top_snippets(returns_df, top_n=20)
-    if trend_df is not None and not trend_df.empty:
-        print("\n=========== TOP 10 TREND CANDIDATES (composite_score desc) ===========")
-        print(trend_df[["composite_score", "1w", "1m", "3m", "6m"]].round(2))
+    if not top_final_df.empty:
+        print("\n=========== TOP 10 FINAL RECOMMENDATIONS (final_score desc) ===========")
+        cols_to_show = [
+            "final_score",
+            "composite_score",
+            "risk_adj_score",
+            "new_momentum_flag",
+            "pullback_flag",
+            "above_50d",
+            "above_200d",
+            "sector",
+            "1w",
+            "1m",
+            "3m",
+            "6m",
+        ]
+        cols_to_show = [c for c in cols_to_show if c in top_final_df.columns]
+        print(top_final_df[cols_to_show].round(3))
 
-    # 7) Save report (includes Top_Trend_10 tab and methodology)
-    save_report(returns_df, ranked_views, trend_df, MASTER_CSV, EXCEL_REPORT)
+    # 16) Save report
+    save_report(
+        returns_df,
+        ranked_views,
+        top_trend_df,
+        top_final_df,
+        top_sector_df,
+        MASTER_CSV,
+        EXCEL_REPORT,
+    )
 
     print("[DONE] All finished.")
 
