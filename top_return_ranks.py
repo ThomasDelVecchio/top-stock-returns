@@ -4,6 +4,7 @@ import pandas as pd
 import yfinance as yf
 from datetime import timedelta
 from openpyxl.styles import Alignment
+from openpyxl.utils import get_column_letter
 
 # ==========================================================
 # CONFIG
@@ -494,7 +495,7 @@ def save_report(
         return df_disp
 
     with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
-        # 1) Master sheet (startrow=1 → row1 for legend, row2 for header)
+        # 1) Master sheet (startrow=1 → row1 blank, row2 = header)
         display_returns(returns_df).to_excel(writer, sheet_name="Master", startrow=1)
 
         # 2) Top_Trend_10 (enriched, but renamed & cleaned)
@@ -641,7 +642,8 @@ def save_report(
 
             final_disp.to_excel(writer, sheet_name="Top_Final_10", startrow=1)
 
-        # 5) ReadMe sheet explaining each tab in simple terms
+        # ---------- Single ReadMe / Legend sheet ----------
+        # Sheet-level descriptions
         readme_sheets = [
             "Master",
             "Top_Trend_10",
@@ -649,51 +651,100 @@ def save_report(
             "Top_Final_10",
         ]
         readme_desc = [
-            "All stocks with 1-week, 1-month, 3-month, and 6-month returns. You can sort any column directly in Excel to see the top performers over that time period.",
+            "All stocks with 1-week, 1-month, 3-month, and 6-month returns. Sort any return column to see top performers.",
             "Top 10 stocks with strong performance across multiple time frames, plus trend health and simple Yes/No flags.",
-            "Best names in each sector based on trend strength and returns.",
-            "Final top 10 stock ideas based on overall score, trend strength, risk-adjusted results, and simple Yes/No signals.",
+            "Strongest names in each sector based on trend strength and returns.",
+            "Final top 10 stock ideas based on overall score, trend strength, risk-adjusted results, and Yes/No signals.",
         ]
-        readme_data = {"Sheet": readme_sheets, "Description": readme_desc}
-        pd.DataFrame(readme_data).to_excel(writer, sheet_name="ReadMe", index=False)
+        sheet_summary = pd.DataFrame(
+            {"Sheet": readme_sheets, "What you'll see here": readme_desc}
+        )
 
+        # Column glossary (friendly names used in Excel)
+        column_glossary = [
+            {
+                "Column": "1W Return",
+                "Appears In": "Master, Top_Trend_10, Top_Sector_Leaders, Top_Final_10",
+                "Meaning": "Percentage price change over the last ~5 trading days.",
+            },
+            {
+                "Column": "1M Return",
+                "Appears In": "Master, Top_Trend_10, Top_Sector_Leaders, Top_Final_10",
+                "Meaning": "Percentage price change over the last ~1 month.",
+            },
+            {
+                "Column": "3M Return",
+                "Appears In": "Master, Top_Trend_10, Top_Sector_Leaders, Top_Final_10",
+                "Meaning": "Percentage price change over the last ~3 months.",
+            },
+            {
+                "Column": "6M Return",
+                "Appears In": "Master, Top_Trend_10, Top_Sector_Leaders, Top_Final_10",
+                "Meaning": "Percentage price change over the last ~6 months.",
+            },
+            {
+                "Column": "Sector",
+                "Appears In": "Top_Trend_10, Top_Sector_Leaders, Top_Final_10",
+                "Meaning": "GICS-style sector classification for the stock (best effort from Yahoo).",
+            },
+            {
+                "Column": "Trend Score",
+                "Appears In": "Top_Trend_10, Top_Sector_Leaders, Top_Final_10",
+                "Meaning": "0–1 score summarizing how strong the stock’s returns are across all time frames.",
+            },
+            {
+                "Column": "Final Score",
+                "Appears In": "Top_Sector_Leaders, Top_Final_10",
+                "Meaning": "Overall ranking that blends trend strength, risk-adjusted strength, and Yes/No signals.",
+            },
+            {
+                "Column": "Risk-Adjusted Strength",
+                "Appears In": "Top_Trend_10, Top_Final_10",
+                "Meaning": "6-month return divided by recent volatility (higher = strong returns for the risk taken).",
+            },
+            {
+                "Column": "Risk-Adjusted Rank",
+                "Appears In": "Top_Trend_10, Top_Final_10",
+                "Meaning": "0–1 percentile rank of risk-adjusted strength relative to all stocks (1 = best).",
+            },
+            {
+                "Column": "Short-Term Trend Healthy?",
+                "Appears In": "Top_Trend_10, Top_Final_10",
+                "Meaning": "Yes if price is above its 50-day moving average (short-term uptrend intact).",
+            },
+            {
+                "Column": "Long-Term Trend Healthy?",
+                "Appears In": "Top_Trend_10, Top_Final_10",
+                "Meaning": "Yes if price is above its 200-day moving average (long-term uptrend intact).",
+            },
+            {
+                "Column": "Speeding Up?",
+                "Appears In": "Top_Trend_10, Top_Final_10",
+                "Meaning": "Yes if shorter-term returns are stronger than longer-term returns (momentum accelerating).",
+            },
+            {
+                "Column": "Recent Pullback?",
+                "Appears In": "Top_Trend_10, Top_Final_10",
+                "Meaning": "Yes if stock had strong 3–6m performance but is flat/down recently (dip in an uptrend).",
+            },
+        ]
+        col_glossary_df = pd.DataFrame(column_glossary)
+
+        # Write ReadMe sheet with two sections
+        startrow_glossary = len(sheet_summary) + 3
+        sheet_summary.to_excel(
+            writer, sheet_name="ReadMe", index=False, startrow=0
+        )
+        col_glossary_df.to_excel(
+            writer, sheet_name="ReadMe", index=False, startrow=startrow_glossary
+        )
+
+        # After all sheets are written, access workbook for formatting & ordering
         wb = writer.book
 
-        # ----- Legends / notes on each key sheet -----
-        sheet_notes = {
-            "Master": (
-                "Each row is a stock. Columns show how much the stock price has changed over the past 1 week, 1 month, "
-                "3 months, and 6 months (as percentage returns). You can sort any of these columns to see the top "
-                "performers over that time period."
-            ),
-            "Top_Trend_10": (
-                "Top 10 stocks based on how strong and consistent their performance has been across 1W, 1M, 3M, and 6M. "
-                "Trend Score = overall strength across time frames. "
-                "Risk-Adjusted fields show strength while considering volatility. "
-                "'Short-Term Trend Healthy?' and 'Long-Term Trend Healthy?' indicate whether the price is above key "
-                "short-term and long-term trend lines. 'Speeding Up?' and 'Recent Pullback?' are simple Yes/No signals "
-                "for accelerating trends or dips after strong runs."
-            ),
-            "Top_Sector_Leaders": (
-                "Shows the strongest names in each sector based on trend strength and returns. This helps you see which "
-                "sectors are leading the market."
-            ),
-            "Top_Final_10": (
-                "Final top 10 stock ideas. 'Final Score' combines trend strength, risk-adjusted strength, and the Yes/No "
-                "signals into one overall rating. Use Sector, the return columns, and the Yes/No fields to understand why "
-                "each stock ranks where it does."
-            ),
-        }
-
-        # Add notes to sheets and wrap text
-        for ws in wb.worksheets:
-            title = ws.title
-            if title in sheet_notes:
-                note_text = sheet_notes[title]
-                ws["A1"] = note_text
-                max_merge_col = min(10, ws.max_column if ws.max_column else 10)
-                ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max_merge_col)
-                ws["A1"].alignment = Alignment(wrap_text=True, vertical="top")
+        # Move ReadMe to the front
+        readme_ws = wb["ReadMe"]
+        wb._sheets = [readme_ws] + [ws for ws in wb.worksheets if ws.title != "ReadMe"]
 
         # ----- Apply % formatting ONLY to obvious percentage columns -----
         percent_like_keywords = ["Return", "Score", "Rank"]
@@ -710,7 +761,25 @@ def save_report(
                     ):
                         cell.number_format = "0.00%"
 
+        # ----- Auto-fit column widths on all sheets -----
+        max_width = 40  # cap so we don't get insanely wide columns
+        for ws in wb.worksheets:
+            for col_cells in ws.columns:
+                max_length = 0
+                col_idx = col_cells[0].column  # numeric index
+                for cell in col_cells:
+                    try:
+                        cell_val = "" if cell.value is None else str(cell.value)
+                    except Exception:
+                        cell_val = ""
+                    if len(cell_val) > max_length:
+                        max_length = len(cell_val)
+                adjusted_width = min(max_length + 2, max_width)
+                col_letter = get_column_letter(col_idx)
+                ws.column_dimensions[col_letter].width = adjusted_width
+
     print(f"[OUT] Excel report saved to {excel_path}")
+
 
 
 def print_top_snippets(returns_df, top_n=20):
